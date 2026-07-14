@@ -34,6 +34,33 @@ const cleanupExpiredPlans = async (userId) => {
   );
 };
 
+// Pulls affordable Tanzanian foods from the `foods` table and formats them
+// into a grouped text block the AI prompt can reference directly, so meal
+// suggestions are grounded in real local, affordable options instead of
+// whatever the model would otherwise invent from general knowledge.
+const getFoodOptionsText = async () => {
+  const [rows] = await db.execute(
+    `SELECT food_name, local_name, meal_category, avg_price_tzs, calories
+     FROM foods
+     WHERE affordability_tier IN ('Low', 'Medium')
+     ORDER BY meal_category, avg_price_tzs ASC`
+  );
+
+  const grouped = { Breakfast: [], Lunch: [], Dinner: [], Snack: [] };
+
+  rows.forEach((f) => {
+    if (grouped[f.meal_category]) {
+      grouped[f.meal_category].push(
+        `${f.local_name} (${f.food_name}) - ~${f.avg_price_tzs} TZS, ${f.calories} kcal`
+      );
+    }
+  });
+
+  return Object.entries(grouped)
+    .map(([category, items]) => `${category}:\n${items.join('\n')}`)
+    .join('\n\n');
+};
+
 const generateMealPlan = async (req, res) => {
   try {
     const userId = req.user?.id;
@@ -61,6 +88,8 @@ const generateMealPlan = async (req, res) => {
       });
     }
 
+    const foodListText = await getFoodOptionsText();
+
     const model = genAI.getGenerativeModel({
       model: 'gemini-3.5-flash',
     });
@@ -74,7 +103,11 @@ const generateMealPlan = async (req, res) => {
 - Goal: ${user.goal}
 
 Rules:
-- Every meal MUST be authentic Tanzanian / East African food, made from ingredients that are cheap and easy to find in a typical Tanzanian market or duka (e.g. ugali, wali, maharage, mchicha, mchuzi wa samaki, ndizi, mtori, pilau, chapati, mandazi, viazi, mahindi, kunde, sukuma wiki, matoke, nyama choma, samaki wa kupaka, uji, kande, mbaazi, mtama, dagaa, etc.)
+- You MUST only use dishes built from foods in the APPROVED FOOD LIST below. Do not invent foods outside this list.
+
+APPROVED FOOD LIST (grouped by meal type, with real Tanzanian market prices):
+${foodListText}
+
 - Do not suggest imported, expensive, or hard-to-find ingredients (no quinoa, salmon, avocado toast, etc.) unless it's something genuinely common in Tanzania
 - Use the local Swahili name for each dish, followed by a short description in parentheses in English (e.g. "Wali na Maharage (rice with beans)")
 - 3 main meals + 2 snacks per day
