@@ -37,7 +37,7 @@ const searchUnsplash = async (mealName) => {
   try {
     const response = await axios.get(UNSPLASH_SEARCH_URL, {
       params: {
-        query: `${mealName} Tanzanian food`,
+        query: mealName,
         per_page: 1,
         orientation: 'squarish',
       },
