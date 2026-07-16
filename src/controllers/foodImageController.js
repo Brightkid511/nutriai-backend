@@ -3,7 +3,7 @@ const db = require('../config/db');
 const genAI = require('../config/gemini');
 
 const SPOONACULAR_API_KEY = process.env.SPOONACULAR_API_KEY;
-const FALLBACK_IMAGE = 'https://images.unsplash.com/photo-1512058564366-18510be2db19?w=700';
+const FALLBACK_IMAGE = 'https://images.unsplash.com/photo-1467003909585-2f8a72700288?w=700';
 
 // ==================== EXPONENTIAL BACKOFF RETRY ====================
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
