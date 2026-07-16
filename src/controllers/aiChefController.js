@@ -1,5 +1,6 @@
 const genAI = require('../config/gemini');
 const db = require('../config/db');
+const { getHealthProfileText } = require('./healthProfileController');
 
 // Converts the chat history sent from Flutter (role: 'user' | 'ai')
 // into the format Gemini's chat API expects (role: 'user' | 'model').
@@ -41,12 +42,15 @@ const chatWithAiChef = async (req, res) => {
       ? `The user's profile: age ${user.age}, weight ${user.weight}kg, height ${user.height}cm, activity level ${user.activity_level}, goal: ${user.goal}. Use this to tailor suggestions (e.g. portion sizes or ingredient choices) when relevant, but don't force it into every reply.`
       : '';
 
+    const healthProfileText = await getHealthProfileText(userId);
+
     const systemInstruction = `You are AI Chef, a friendly, practical cooking assistant inside the NutriAI app.
 
 Your main job: help the user decide what to cook, especially based on ingredients they already have at home.
-
+${healthProfileText ? `\n${healthProfileText}\nThese are hard constraints - never suggest a dish that conflicts with the user's allergies, and keep conditions/dietary preference in mind for every suggestion.\n` : ''}
 Guidelines:
 - When the user lists ingredients, suggest 1-3 realistic meals they could make with them (or mostly with them), favoring simple, common preparations.
+- If a suggestion would normally include something the user is allergic to, either omit it or suggest a safe substitute, and don't mention the omitted ingredient in your reasoning.
 - If you don't have enough detail (e.g. they just say "I have chicken"), ask a short clarifying question (e.g. what else they have, how much time, dietary preference) before giving a full recipe.
 - Keep replies conversational and concise - this is a chat, not a recipe book. Use short paragraphs or a short list, not long essays.
 - When giving a recipe, keep it practical: ingredients list + brief steps, nothing overly technical.

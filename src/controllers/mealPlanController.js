@@ -1,5 +1,6 @@
 const genAI = require('../config/gemini');
 const db = require('../config/db');
+const { getHealthProfileText } = require('./healthProfileController');
 
 const PLAN_TTL_DAYS = 7;
 
@@ -89,6 +90,7 @@ const generateMealPlan = async (req, res) => {
     }
 
     const foodListText = await getFoodOptionsText();
+    const healthProfileText = await getHealthProfileText(userId);
 
     const model = genAI.getGenerativeModel({
       model: 'gemini-3.5-flash',
@@ -101,9 +103,10 @@ const generateMealPlan = async (req, res) => {
 - Height: ${user.height} cm
 - Activity Level: ${user.activity_level}
 - Goal: ${user.goal}
-
+${healthProfileText ? `\n${healthProfileText}\n` : ''}
 Rules:
 - You MUST only use dishes built from foods in the APPROVED FOOD LIST below. Do not invent foods outside this list.
+${healthProfileText ? '- The ALLERGIES and HEALTH CONDITIONS notes above are hard constraints - they override every other rule below, including variety and the approved food list. If an approved food conflicts with an allergy, skip it.' : ''}
 
 APPROVED FOOD LIST (grouped by meal type, with real Tanzanian market prices):
 ${foodListText}
