@@ -1,12 +1,69 @@
 const axios = require('axios');
 const db = require('../config/db');
+const genAI = require('../config/gemini');
 
-const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
-const UNSPLASH_SEARCH_URL = 'https://api.unsplash.com/search/photos';
+const SPOONACULAR_API_KEY = process.env.SPOONACULAR_API_KEY;
+const FALLBACK_IMAGE = 'https://images.unsplash.com/photo-1512058564366-18510be2db19?w=700';
 
-const FALLBACK_IMAGE =
-  'https://images.unsplash.com/photo-1512058564366-18510be2db19?w=700';
+// ==================== EXPONENTIAL BACKOFF RETRY ====================
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+const withRetry = async (fn, maxRetries = 4, baseDelay = 1200) => {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt === maxRetries) {
+        console.error(`All ${maxRetries + 1} attempts failed.`);
+        throw error;
+      }
+      const delay = baseDelay * Math.pow(2, attempt);
+      console.warn(`Attempt ${attempt + 1} failed. Retrying in ${delay}ms...`);
+      await sleep(delay);
+    }
+  }
+};
+
+// ==================== TRANSLATION (Gemini + Fallback) ====================
+const translateToEnglish = async (text) => {
+  if (!text) return text;
+  if (/^[a-zA-Z0-9\s,().&'-]+$/.test(text.trim())) return text.trim();
+
+  try {
+    return await withRetry(async () => {
+      const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
+      const prompt = `Translate this food/dish name to natural English. Return ONLY the English name.\n\nFood: "${text}"\n\nEnglish:`;
+      
+      const result = await model.generateContent(prompt);
+      let translated = result.response.text().trim();
+      return translated.replace(/^English:?\s*/i, '').trim() || text;
+    }, 3, 1000);
+  } catch (e) {
+    console.error('Translation failed, using original:', text);
+  }
+
+  // Hardcoded fallback
+  const map = {
+    "wali na maharage": "rice and beans",
+    "wali": "rice",
+    "ugali": "ugali",
+    "nyama choma": "grilled meat",
+    "samaki": "fried fish",
+    "kuku choma": "grilled chicken",
+    "kuku": "chicken",
+    "mchicha": "spinach",
+    "pilau": "pilau rice",
+    "maandazi": "mandazi",
+    "mayai": "eggs",
+    "ndizi": "banana",
+    "viazi": "potatoes",
+    "maharage": "beans",
+    "chai": "tea",
+  };
+  return map[text.toLowerCase().trim()] || text;
+};
+
+// ==================== CACHING ====================
 const getCachedImage = async (mealName) => {
   const [rows] = await db.execute(
     'SELECT image_url FROM food_images WHERE LOWER(meal_name) = LOWER(?) LIMIT 1',
@@ -24,82 +81,53 @@ const cacheImage = async (mealName, imageUrl) => {
       [mealName, imageUrl]
     );
   } catch (error) {
-    console.error('Failed to cache food image:', error.message);
+    console.error('Cache error:', error.message);
   }
 };
 
-const searchUnsplash = async (mealName) => {
-  if (!UNSPLASH_ACCESS_KEY) {
-    console.error('UNSPLASH_ACCESS_KEY is not set');
-    return null;
-  }
+// ==================== SPOONACULAR SEARCH ====================
+const searchSpoonacular = async (mealName) => {
+  if (!SPOONACULAR_API_KEY) return null;
 
-  try {
-    const response = await axios.get(UNSPLASH_SEARCH_URL, {
-      params: {
-        query: mealName,
-        per_page: 1,
-        orientation: 'squarish',
-      },
-      headers: {
-        Authorization: `Client-ID ${UNSPLASH_ACCESS_KEY}`,
-      },
-      timeout: 8000,
+  const englishName = await translateToEnglish(mealName);
+
+  return await withRetry(async () => {
+    const response = await axios.get('https://api.spoonacular.com/recipes/complexSearch', {
+      params: { query: englishName, number: 1, sort: 'popularity' },
+      headers: { 'x-api-key': SPOONACULAR_API_KEY },
+      timeout: 10000,
     });
-
-    const results = response.data?.results;
-    if (results && results.length > 0) {
-      return results[0].urls.regular;
-    }
-    return null;
-  } catch (error) {
-    console.error('Unsplash search failed:', error.message);
-    return null;
-  }
+    return response.data?.results?.[0]?.image || null;
+  }, 4, 1200);
 };
 
-// GET /api/food-images?name=Rice+and+Beans
+// ==================== MAIN ENDPOINT ====================
 const getFoodImage = async (req, res) => {
   try {
     const { name } = req.query;
-
-    if (!name || !name.trim()) {
-      return res.status(400).json({
-        success: false,
-        error: 'Query param "name" is required',
-      });
+    if (!name?.trim()) {
+      return res.status(400).json({ success: false, error: 'Name is required' });
     }
 
     const cached = await getCachedImage(name);
     if (cached) {
-      return res.json({
-        success: true,
-        mealName: name,
-        imageUrl: cached,
-      });
+      return res.json({ success: true, mealName: name, imageUrl: cached });
     }
 
-    const found = await searchUnsplash(name);
-    if (found) {
-      await cacheImage(name, found);
-      return res.json({
-        success: true,
-        mealName: name,
-        imageUrl: found,
-      });
+    const imageUrl = await searchSpoonacular(name);
+
+    if (imageUrl) {
+      await cacheImage(name, imageUrl);
+      return res.json({ success: true, mealName: name, imageUrl });
     }
 
-    return res.json({
-      success: true,
-      mealName: name,
-      imageUrl: FALLBACK_IMAGE,
-    });
+    return res.json({ success: true, mealName: name, imageUrl: FALLBACK_IMAGE });
   } catch (error) {
-    console.error('Error fetching food image:', error);
-
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to fetch food image',
+    console.error('getFoodImage error:', error.message);
+    return res.json({ 
+      success: true, 
+      mealName: req.query.name, 
+      imageUrl: FALLBACK_IMAGE 
     });
   }
 };
