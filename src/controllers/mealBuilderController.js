@@ -1,10 +1,7 @@
 const crypto = require('crypto');
 const genAI = require('../config/gemini');
 const db = require('../config/db');
-const {
-  getHealthProfileForUser,
-  buildHealthConstraintsText,
-} = require('../services/healthProfileService');
+const { getHealthProfileText } = require('./healthProfileController');
 
 const VALID_MEAL_TYPES = ['breakfast', 'lunch', 'dinner', 'snack'];
 
@@ -61,8 +58,7 @@ const suggestMeals = async (req, res) => {
     const user = users[0];
     if (!user) return res.status(404).json({ success: false, error: 'User not found' });
 
-    const healthProfile = await getHealthProfileForUser(userId);
-    const healthConstraintsText = buildHealthConstraintsText(healthProfile);
+    const healthConstraintsText = await getHealthProfileText(userId);
     const category = categoryForMealType(meal_type);
     const foodListText = await getFoodOptionsForCategory(category);
 
@@ -176,8 +172,7 @@ const replaceSuggestion = async (req, res) => {
       [userId, original.meal_name]
     );
 
-    const healthProfile = await getHealthProfileForUser(userId);
-    const healthConstraintsText = buildHealthConstraintsText(healthProfile);
+    const healthConstraintsText = await getHealthProfileText(userId);
     const category = categoryForMealType(original.meal_type);
     const foodListText = await getFoodOptionsForCategory(category);
 
