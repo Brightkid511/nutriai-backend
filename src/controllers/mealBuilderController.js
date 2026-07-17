@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const genAI = require('../config/gemini');
 const db = require('../config/db');
-const { getHealthProfileForUser, buildHealthConstraintsText } = require('../utils/healthProfile');
+const { getHealthProfileForUser, buildHealthConstraintsText } = require('./healthProfile');
 
 const VALID_MEAL_TYPES = ['breakfast', 'lunch', 'dinner', 'snack'];
 
