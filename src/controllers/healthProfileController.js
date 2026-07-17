@@ -1,179 +1,65 @@
 const db = require('../config/db');
 
-const parseJsonArraySafely = (value) => {
-  if (Array.isArray(value)) return value;
+const parseListSafely = (value) => {
   if (!value) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'object') return value;
 
-  if (typeof value === 'string') {
-    try {
-      const parsed = JSON.parse(value);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch (error) {
-      return [];
-    }
-  }
-
-  return [];
-};
-
-const toProfileResponse = (row) => {
-  if (!row) {
-    return {
-      allergies: [],
-      conditions: [],
-      dietaryPreference: 'None',
-      notes: '',
-    };
-  }
-
-  return {
-    allergies: parseJsonArraySafely(row.allergies),
-    conditions: parseJsonArraySafely(row.conditions),
-    dietaryPreference: row.dietary_preference || 'None',
-    notes: row.notes || '',
-  };
-};
-
-// GET /api/health-profile
-const getHealthProfile = async (req, res) => {
   try {
-    const userId = req.user?.id;
-
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        error: 'User ID not found in token',
-      });
-    }
-
-    const [rows] = await db.execute(
-      'SELECT * FROM health_profiles WHERE user_id = ?',
-      [userId]
-    );
-
-    return res.json({
-      success: true,
-      profile: toProfileResponse(rows[0]),
-    });
-  } catch (error) {
-    console.error('Error fetching health profile:', error);
-
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to fetch health profile',
-    });
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
   }
 };
 
-// PUT /api/health-profile
-// body: { allergies: string[], conditions: string[], dietaryPreference: string, notes: string }
-const updateHealthProfile = async (req, res) => {
-  try {
-    const userId = req.user?.id;
-
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        error: 'User ID not found in token',
-      });
-    }
-
-    const {
-      allergies = [],
-      conditions = [],
-      dietaryPreference = 'None',
-      notes = '',
-    } = req.body;
-
-    if (!Array.isArray(allergies) || !Array.isArray(conditions)) {
-      return res.status(400).json({
-        success: false,
-        error: 'allergies and conditions must be arrays',
-      });
-    }
-
-    await db.execute(
-      `INSERT INTO health_profiles
-       (user_id, allergies, conditions, dietary_preference, notes)
-       VALUES (?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         allergies = VALUES(allergies),
-         conditions = VALUES(conditions),
-         dietary_preference = VALUES(dietary_preference),
-         notes = VALUES(notes),
-         updated_at = NOW()`,
-      [
-        userId,
-        JSON.stringify(allergies),
-        JSON.stringify(conditions),
-        dietaryPreference,
-        notes,
-      ]
-    );
-
-    const [rows] = await db.execute(
-      'SELECT * FROM health_profiles WHERE user_id = ?',
-      [userId]
-    );
-
-    return res.json({
-      success: true,
-      message: 'Health profile saved successfully',
-      profile: toProfileResponse(rows[0]),
-    });
-  } catch (error) {
-    console.error('Error saving health profile:', error);
-
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to save health profile',
-    });
-  }
-};
-
-// Builds a short natural-language block describing the user's health
-// profile, meant to be dropped straight into an AI prompt. Used by both
-// the meal-plan generator and AI Chef so suggestions stay safe.
-// Returns '' if the user has no relevant profile data.
-const getHealthProfileText = async (userId) => {
+const getHealthProfileForUser = async (userId) => {
   const [rows] = await db.execute(
-    'SELECT * FROM health_profiles WHERE user_id = ?',
+    'SELECT allergies, conditions, notes, preferred_foods, foods_to_avoid FROM health_profiles WHERE user_id = ?',
     [userId]
   );
 
-  const profile = toProfileResponse(rows[0]);
-  const { allergies, conditions, dietaryPreference, notes } = profile;
+  if (rows.length === 0) {
+    return { allergies: [], conditions: [], notes: null, preferredFoods: [], foodsToAvoid: [] };
+  }
 
-  const parts = [];
+  return {
+    allergies: parseListSafely(rows[0].allergies),
+    conditions: parseListSafely(rows[0].conditions),
+    notes: rows[0].notes || null,
+    preferredFoods: parseListSafely(rows[0].preferred_foods),
+    foodsToAvoid: parseListSafely(rows[0].foods_to_avoid),
+  };
+};
+
+const buildHealthConstraintsText = ({ allergies, conditions, notes, preferredFoods, foodsToAvoid }) => {
+  const lines = [];
 
   if (allergies.length > 0) {
-    parts.push(
-      `ALLERGIES - the user is allergic to: ${allergies.join(', ')}. ` +
-      `Do NOT include these ingredients or anything derived from them, under any circumstances.`
+    lines.push(
+      `STRICT ALLERGY EXCLUSION - the user is allergic to: ${allergies.join(', ')}. Never include these ingredients or anything derived from them, even in small amounts. This overrides every other instruction.`
     );
   }
 
   if (conditions.length > 0) {
-    parts.push(
-      `HEALTH CONDITIONS - the user has: ${conditions.join(', ')}. ` +
-      `Favor meals appropriate for managing these conditions ` +
-      `(e.g. low-glycemic and controlled-carb options for diabetes, low-sodium for hypertension).`
+    lines.push(
+      `MEDICAL CONDITIONS - the user has: ${conditions.join(', ')}. Adjust meal choices to be appropriate for these conditions (e.g. low-glycemic-index and controlled carbs for diabetes, low sodium for hypertension, low purine for gout). Only adjust food choices - do not give medical dosing or treatment advice.`
     );
   }
 
-  if (dietaryPreference && dietaryPreference !== 'None') {
-    parts.push(`DIETARY PREFERENCE - ${dietaryPreference}.`);
+  if (foodsToAvoid && foodsToAvoid.length > 0) {
+    lines.push(`FOODS THE USER WANTS TO AVOID (preference, not allergy): ${foodsToAvoid.join(', ')}. Do not suggest these.`);
   }
 
-  if (notes && notes.trim()) {
-    parts.push(`ADDITIONAL NOTES FROM USER - ${notes.trim()}`);
+  if (preferredFoods && preferredFoods.length > 0) {
+    lines.push(`FOODS THE USER PREFERS: ${preferredFoods.join(', ')}. Favor these when they fit the meal type and nutrition target.`);
   }
 
-  return parts.join('\n');
+  if (notes) {
+    lines.push(`ADDITIONAL HEALTH NOTES FROM USER: ${notes}`);
+  }
+
+  return lines.join('\n');
 };
 
-module.exports = {
-  getHealthProfile,
-  updateHealthProfile,
-  getHealthProfileText,
-};
+module.exports = { getHealthProfileForUser, buildHealthConstraintsText };

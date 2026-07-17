@@ -10,6 +10,8 @@ const aiChefRoutes = require('./src/routes/aiChefRoutes');
 const healthProfileRoutes = require('./src/routes/healthProfileRoutes');
 const medicationRoutes = require('./src/routes/medicationRoutes');
 const cycleTrackingRoutes = require('./src/routes/cycleTrackingRoutes');
+const mealBuilderRoutes = require('./src/routes/mealBuilderRoutes');
+
 // ...
 
 
@@ -31,6 +33,7 @@ app.use('/api/ai-chef', aiChefRoutes);
 app.use('/api/health-profile', healthProfileRoutes);
 app.use('/api/medications', medicationRoutes);
 app.use('/api/cycle-tracking', cycleTrackingRoutes);
+app.use('/api/meal-builder', mealBuilderRoutes);
   
 // Health check
 app.get('/', (req, res) => {
