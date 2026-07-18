@@ -7,6 +7,7 @@ const {
   selectMeal,
   getSelectedMeals,
   savePlan,
+  getPlanHistory,
 } = require('../controllers/mealBuilderController');
 
 const { getShoppingList, regenerateShoppingList } = require('../controllers/shoppingListController');
@@ -20,6 +21,7 @@ router.post('/suggest/:id/replace', authenticateToken, replaceSuggestion);
 router.post('/select', authenticateToken, selectMeal);
 router.get('/selected', authenticateToken, getSelectedMeals);
 router.post('/save', authenticateToken, savePlan);
+router.get('/history', authenticateToken, getPlanHistory);
 
 router.get('/shopping-list/:planId', authenticateToken, getShoppingList);
 router.post('/shopping-list/:planId/regenerate', authenticateToken, regenerateShoppingList);

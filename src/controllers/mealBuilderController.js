@@ -397,4 +397,29 @@ const savePlan = async (req, res) => {
   }
 };
 
-module.exports = { suggestMeals, replaceSuggestion, selectMeal, getSelectedMeals, savePlan };
+// GET /api/meal-builder/history
+const getPlanHistory = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ success: false, error: 'User ID not found in token' });
+
+    const [rows] = await db.execute(
+      `SELECT * FROM meal_plan_history WHERE user_id = ? ORDER BY plan_date DESC`,
+      [userId]
+    );
+
+    return res.json({ success: true, plans: rows });
+  } catch (error) {
+    console.error('Get plan history error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+module.exports = {
+  suggestMeals,
+  replaceSuggestion,
+  selectMeal,
+  getSelectedMeals,
+  savePlan,
+  getPlanHistory,
+};
