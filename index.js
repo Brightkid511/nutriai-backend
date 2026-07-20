@@ -1,6 +1,6 @@
 // index.js
 require('dotenv').config();
-require('express-async-errors'); // lets controllers just `throw` - errors auto-forward to errorHandler
+
 
 const express = require('express');
 const cors = require('cors');
