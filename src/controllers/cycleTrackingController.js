@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const AppError = require('../utils/AppError');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -115,224 +116,122 @@ const buildPredictions = (logs, settings) => {
 // Returns logged history, settings, and computed predictions.
 // This endpoint is available to any user - it is not gender-gated.
 const getCycleData = async (req, res) => {
-  try {
-    const userId = req.user?.id;
+  const userId = req.user?.id;
+  if (!userId) throw new AppError('User ID not found in token', 401);
 
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        error: 'User ID not found in token',
-      });
-    }
+  const [logs] = await db.execute(
+    `SELECT * FROM period_logs WHERE user_id = ? ORDER BY start_date DESC LIMIT 24`,
+    [userId]
+  );
 
-    const [logs] = await db.execute(
-      `SELECT * FROM period_logs
-       WHERE user_id = ?
-       ORDER BY start_date DESC
-       LIMIT 24`,
-      [userId]
-    );
+  const settings = await getSettings(userId);
+  const predictions = buildPredictions(logs, settings);
 
-    const settings = await getSettings(userId);
-    const predictions = buildPredictions(logs, settings);
-
-    return res.json({
-      success: true,
-      logs: logs.map(toLogResponse),
-      settings,
-      predictions,
-    });
-  } catch (error) {
-    console.error('Error fetching cycle data:', error);
-
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to fetch cycle tracking data',
-    });
-  }
+  return res.json({
+    success: true,
+    logs: logs.map(toLogResponse),
+    settings,
+    predictions,
+  });
 };
 
 // POST /api/cycle-tracking/logs
 // body: { startDate, endDate?, symptoms?: string[], notes? }
 const createLog = async (req, res) => {
-  try {
-    const userId = req.user?.id;
+  const userId = req.user?.id;
+  if (!userId) throw new AppError('User ID not found in token', 401);
 
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        error: 'User ID not found in token',
-      });
-    }
+  const { startDate, endDate = null, symptoms = [], notes = '' } = req.body;
 
-    const { startDate, endDate = null, symptoms = [], notes = '' } = req.body;
+  if (!startDate) throw new AppError('startDate is required', 400);
 
-    if (!startDate) {
-      return res.status(400).json({
-        success: false,
-        error: 'startDate is required',
-      });
-    }
+  const [result] = await db.execute(
+    `INSERT INTO period_logs (user_id, start_date, end_date, symptoms, notes)
+     VALUES (?, ?, ?, ?, ?)`,
+    [userId, startDate, endDate, JSON.stringify(symptoms), notes]
+  );
 
-    const [result] = await db.execute(
-      `INSERT INTO period_logs (user_id, start_date, end_date, symptoms, notes)
-       VALUES (?, ?, ?, ?, ?)`,
-      [userId, startDate, endDate, JSON.stringify(symptoms), notes]
-    );
+  const [rows] = await db.execute('SELECT * FROM period_logs WHERE id = ?', [result.insertId]);
 
-    const [rows] = await db.execute(
-      'SELECT * FROM period_logs WHERE id = ?',
-      [result.insertId]
-    );
-
-    return res.status(201).json({
-      success: true,
-      message: 'Period logged successfully',
-      log: toLogResponse(rows[0]),
-    });
-  } catch (error) {
-    console.error('Error creating period log:', error);
-
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to log period',
-    });
-  }
+  return res.status(201).json({
+    success: true,
+    message: 'Period logged successfully',
+    log: toLogResponse(rows[0]),
+  });
 };
 
 // PUT /api/cycle-tracking/logs/:id
 // Used mainly to set endDate once a logged period finishes.
 const updateLog = async (req, res) => {
-  try {
-    const userId = req.user?.id;
-    const { id } = req.params;
-    const { startDate, endDate = null, symptoms = [], notes = '' } = req.body;
+  const userId = req.user?.id;
+  const { id } = req.params;
+  const { startDate, endDate = null, symptoms = [], notes = '' } = req.body;
 
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        error: 'User ID not found in token',
-      });
-    }
+  if (!userId) throw new AppError('User ID not found in token', 401);
+  if (!startDate) throw new AppError('startDate is required', 400);
 
-    if (!startDate) {
-      return res.status(400).json({
-        success: false,
-        error: 'startDate is required',
-      });
-    }
+  const [result] = await db.execute(
+    `UPDATE period_logs
+     SET start_date = ?, end_date = ?, symptoms = ?, notes = ?, updated_at = NOW()
+     WHERE id = ? AND user_id = ?`,
+    [startDate, endDate, JSON.stringify(symptoms), notes, id, userId]
+  );
 
-    const [result] = await db.execute(
-      `UPDATE period_logs
-       SET start_date = ?, end_date = ?, symptoms = ?, notes = ?, updated_at = NOW()
-       WHERE id = ? AND user_id = ?`,
-      [startDate, endDate, JSON.stringify(symptoms), notes, id, userId]
-    );
-
-    if (result.affectedRows === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'Period log not found',
-      });
-    }
-
-    const [rows] = await db.execute(
-      'SELECT * FROM period_logs WHERE id = ?',
-      [id]
-    );
-
-    return res.json({
-      success: true,
-      message: 'Period log updated successfully',
-      log: toLogResponse(rows[0]),
-    });
-  } catch (error) {
-    console.error('Error updating period log:', error);
-
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to update period log',
-    });
+  if (result.affectedRows === 0) {
+    throw new AppError('Period log not found', 404);
   }
+
+  const [rows] = await db.execute('SELECT * FROM period_logs WHERE id = ?', [id]);
+
+  return res.json({
+    success: true,
+    message: 'Period log updated successfully',
+    log: toLogResponse(rows[0]),
+  });
 };
 
 // DELETE /api/cycle-tracking/logs/:id
 const deleteLog = async (req, res) => {
-  try {
-    const userId = req.user?.id;
-    const { id } = req.params;
+  const userId = req.user?.id;
+  const { id } = req.params;
 
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        error: 'User ID not found in token',
-      });
-    }
+  if (!userId) throw new AppError('User ID not found in token', 401);
 
-    const [result] = await db.execute(
-      'DELETE FROM period_logs WHERE id = ? AND user_id = ?',
-      [id, userId]
-    );
+  const [result] = await db.execute(
+    'DELETE FROM period_logs WHERE id = ? AND user_id = ?',
+    [id, userId]
+  );
 
-    if (result.affectedRows === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'Period log not found',
-      });
-    }
-
-    return res.json({
-      success: true,
-      message: 'Period log deleted successfully',
-      logId: id,
-    });
-  } catch (error) {
-    console.error('Error deleting period log:', error);
-
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to delete period log',
-    });
+  if (result.affectedRows === 0) {
+    throw new AppError('Period log not found', 404);
   }
+
+  return res.json({ success: true, message: 'Period log deleted successfully', logId: id });
 };
 
 // PUT /api/cycle-tracking/settings
 // body: { avgCycleLength, avgPeriodLength }
 const updateSettings = async (req, res) => {
-  try {
-    const userId = req.user?.id;
-    const { avgCycleLength = 28, avgPeriodLength = 5 } = req.body;
+  const userId = req.user?.id;
+  const { avgCycleLength = 28, avgPeriodLength = 5 } = req.body;
 
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        error: 'User ID not found in token',
-      });
-    }
+  if (!userId) throw new AppError('User ID not found in token', 401);
 
-    await db.execute(
-      `INSERT INTO cycle_settings (user_id, avg_cycle_length, avg_period_length)
-       VALUES (?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         avg_cycle_length = VALUES(avg_cycle_length),
-         avg_period_length = VALUES(avg_period_length),
-         updated_at = NOW()`,
-      [userId, avgCycleLength, avgPeriodLength]
-    );
+  await db.execute(
+    `INSERT INTO cycle_settings (user_id, avg_cycle_length, avg_period_length)
+     VALUES (?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       avg_cycle_length = VALUES(avg_cycle_length),
+       avg_period_length = VALUES(avg_period_length),
+       updated_at = NOW()`,
+    [userId, avgCycleLength, avgPeriodLength]
+  );
 
-    return res.json({
-      success: true,
-      message: 'Cycle settings updated successfully',
-      settings: { avgCycleLength, avgPeriodLength },
-    });
-  } catch (error) {
-    console.error('Error updating cycle settings:', error);
-
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to update cycle settings',
-    });
-  }
+  return res.json({
+    success: true,
+    message: 'Cycle settings updated successfully',
+    settings: { avgCycleLength, avgPeriodLength },
+  });
 };
 
 module.exports = {

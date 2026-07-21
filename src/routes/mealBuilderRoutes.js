@@ -8,6 +8,8 @@ const {
   getSelectedMeals,
   savePlan,
   getPlanHistory,
+  autoFillWeek,
+  confirmWeek,
 } = require('../controllers/mealBuilderController');
 
 const { getShoppingList, regenerateShoppingList } = require('../controllers/shoppingListController');
@@ -22,6 +24,9 @@ router.post('/select', authenticateToken, selectMeal);
 router.get('/selected', authenticateToken, getSelectedMeals);
 router.post('/save', authenticateToken, savePlan);
 router.get('/history', authenticateToken, getPlanHistory);
+
+router.post('/auto-fill-week', authenticateToken, autoFillWeek);
+router.post('/confirm-week', authenticateToken, confirmWeek);
 
 router.get('/shopping-list/:planId', authenticateToken, getShoppingList);
 router.post('/shopping-list/:planId/regenerate', authenticateToken, regenerateShoppingList);

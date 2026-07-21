@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const AppError = require('../utils/AppError');
 
 const calculateTargets = (user) => {
   const weight = parseFloat(user.weight) || 60;
@@ -45,50 +46,45 @@ const percentOf = (actual, target) => {
 
 // GET /api/meal-builder/nutrition-score/:planId
 const getNutritionScore = async (req, res) => {
-  try {
-    const userId = req.user?.id;
-    const { planId } = req.params;
+  const userId = req.user?.id;
+  const { planId } = req.params;
 
-    if (!userId) return res.status(401).json({ success: false, error: 'User ID not found in token' });
+  if (!userId) throw new AppError('User ID not found in token', 401);
 
-    const [plans] = await db.execute(
-      `SELECT * FROM meal_plan_history WHERE id = ? AND user_id = ?`,
-      [planId, userId]
-    );
-    const plan = plans[0];
+  const [plans] = await db.execute(
+    `SELECT * FROM meal_plan_history WHERE id = ? AND user_id = ?`,
+    [planId, userId]
+  );
+  const plan = plans[0];
 
-    if (!plan) return res.status(404).json({ success: false, error: 'Plan not found' });
+  if (!plan) throw new AppError('Plan not found', 404);
 
-    const [users] = await db.execute('SELECT * FROM users WHERE id = ?', [userId]);
-    const user = users[0];
+  const [users] = await db.execute('SELECT * FROM users WHERE id = ?', [userId]);
+  const user = users[0];
 
-    const targets = calculateTargets(user);
+  const targets = calculateTargets(user);
 
-    // Fiber isn't tracked per-meal yet, so estimate roughly from carbs as a placeholder
-    const estimatedFiber = (parseFloat(plan.total_carbs_g) || 0) * 0.12;
+  // Fiber isn't tracked per-meal yet, so estimate roughly from carbs as a placeholder
+  const estimatedFiber = (parseFloat(plan.total_carbs_g) || 0) * 0.12;
 
-    const breakdown = {
-      protein: { actual: parseFloat(plan.total_protein_g) || 0, target: targets.protein_g, percent: percentOf(plan.total_protein_g, targets.protein_g) },
-      carbohydrates: { actual: parseFloat(plan.total_carbs_g) || 0, target: targets.carbs_g, percent: percentOf(plan.total_carbs_g, targets.carbs_g) },
-      healthy_fats: { actual: parseFloat(plan.total_fat_g) || 0, target: targets.fat_g, percent: percentOf(plan.total_fat_g, targets.fat_g) },
-      fiber: { actual: Math.round(estimatedFiber), target: targets.fiber_g, percent: percentOf(estimatedFiber, targets.fiber_g) },
-    };
+  const breakdown = {
+    protein: { actual: parseFloat(plan.total_protein_g) || 0, target: targets.protein_g, percent: percentOf(plan.total_protein_g, targets.protein_g) },
+    carbohydrates: { actual: parseFloat(plan.total_carbs_g) || 0, target: targets.carbs_g, percent: percentOf(plan.total_carbs_g, targets.carbs_g) },
+    healthy_fats: { actual: parseFloat(plan.total_fat_g) || 0, target: targets.fat_g, percent: percentOf(plan.total_fat_g, targets.fat_g) },
+    fiber: { actual: Math.round(estimatedFiber), target: targets.fiber_g, percent: percentOf(estimatedFiber, targets.fiber_g) },
+  };
 
-    const overallScore = Math.round(
-      (breakdown.protein.percent + breakdown.carbohydrates.percent + breakdown.healthy_fats.percent + breakdown.fiber.percent) / 4
-    );
+  const overallScore = Math.round(
+    (breakdown.protein.percent + breakdown.carbohydrates.percent + breakdown.healthy_fats.percent + breakdown.fiber.percent) / 4
+  );
 
-    return res.json({
-      success: true,
-      calorie_target: targets.calories,
-      calorie_actual: plan.total_calories,
-      breakdown,
-      overall_score: overallScore,
-    });
-  } catch (error) {
-    console.error('Get nutrition score error:', error);
-    return res.status(500).json({ success: false, error: error.message });
-  }
+  return res.json({
+    success: true,
+    calorie_target: targets.calories,
+    calorie_actual: plan.total_calories,
+    breakdown,
+    overall_score: overallScore,
+  });
 };
 
 module.exports = { getNutritionScore };

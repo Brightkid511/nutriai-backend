@@ -1,5 +1,6 @@
 const genAI = require('../config/gemini');
 const db = require('../config/db');
+const AppError = require('../utils/AppError');
 
 const parseJsonSafely = (value, fallback = {}) => {
   if (!value) return fallback;
@@ -22,14 +23,56 @@ const parseJsonSafely = (value, fallback = {}) => {
   return fallback;
 };
 
-// Turns the raw plan JSON blobs from the DB into a short, readable
-// text block the AI can reason about (day -> meal type -> meal name).
-const buildMealSummaryText = (plans) => {
+const fetchMealBuilderDays = async (userId) => {
+  const [rows] = await db.execute(
+    `SELECT plan_date, breakfast_name, lunch_name, dinner_name, snack_name
+     FROM meal_plan_history
+     WHERE user_id = ?
+     ORDER BY plan_date DESC
+     LIMIT 7`,
+    [userId]
+  );
+  return rows;
+};
+
+const fetchPersonalPlans = async (userId) => {
+  const [rows] = await db.execute(
+    `SELECT name, plan
+     FROM personal_meal_plans
+     WHERE user_id = ? AND plan_type = 'personal'
+     AND (expires_at IS NULL OR expires_at >= NOW())
+     ORDER BY created_at DESC
+     LIMIT 3`,
+    [userId]
+  );
+  return rows;
+};
+
+// Turns saved Meal Builder days + any personal plans into a short,
+// readable text block the AI can reason about.
+const buildMealSummaryText = (builderDays, personalPlans) => {
   const lines = [];
 
-  plans.forEach((planRow) => {
+  builderDays.forEach((row) => {
+    const dateStr =
+      row.plan_date instanceof Date
+        ? row.plan_date.toISOString().split('T')[0]
+        : row.plan_date;
+
+    const mealParts = [];
+    if (row.breakfast_name) mealParts.push(`breakfast: ${row.breakfast_name}`);
+    if (row.lunch_name) mealParts.push(`lunch: ${row.lunch_name}`);
+    if (row.dinner_name) mealParts.push(`dinner: ${row.dinner_name}`);
+    if (row.snack_name) mealParts.push(`snack: ${row.snack_name}`);
+
+    if (mealParts.length > 0) {
+      lines.push(`[Meal Builder] ${dateStr} - ${mealParts.join(', ')}`);
+    }
+  });
+
+  personalPlans.forEach((planRow) => {
     const plan = parseJsonSafely(planRow.plan, {});
-    const label = planRow.plan_type === 'ai' ? 'AI Weekly Plan' : (planRow.name || 'Personal Plan');
+    const label = planRow.name || 'Personal Plan';
 
     Object.entries(plan).forEach(([day, meals]) => {
       if (!meals || typeof meals !== 'object') return;
@@ -47,17 +90,13 @@ const buildMealSummaryText = (plans) => {
   return lines.join('\n');
 };
 
-const fetchUserPlans = async (userId) => {
-  const [plans] = await db.execute(
-    `SELECT id, name, plan, plan_type
-     FROM personal_meal_plans
-     WHERE user_id = ?
-     AND (expires_at IS NULL OR expires_at >= NOW())
-     ORDER BY created_at DESC
-     LIMIT 6`,
-    [userId]
+const saveAnalysis = async (userId, analysis) => {
+  await db.execute(
+    `INSERT INTO nutrition_analysis (user_id, analysis)
+     VALUES (?, ?)
+     ON DUPLICATE KEY UPDATE analysis = VALUES(analysis), updated_at = NOW()`,
+    [userId, JSON.stringify(analysis)]
   );
-  return plans;
 };
 
 // Core generation logic, shared by both the cached GET and the forced
@@ -67,11 +106,15 @@ const runAnalysis = async (userId) => {
   const user = users[0];
 
   if (!user) {
-    throw new Error('User not found');
+    throw new AppError('User not found', 404);
   }
 
-  const plans = await fetchUserPlans(userId);
-  const mealSummary = buildMealSummaryText(plans);
+  const [builderDays, personalPlans] = await Promise.all([
+    fetchMealBuilderDays(userId),
+    fetchPersonalPlans(userId),
+  ]);
+
+  const mealSummary = buildMealSummaryText(builderDays, personalPlans);
 
   if (!mealSummary) {
     // No plans to analyze yet - return a friendly placeholder instead of
@@ -85,15 +128,13 @@ const runAnalysis = async (userId) => {
         minerals: { percent: 0, status: 'No data' },
       },
       advice: [
-        'Create or generate a meal plan first so I can analyze your nutrition balance.',
+        'Save a few meals with the Meal Builder, or plan your whole week, so I can analyze your nutrition balance.',
       ],
     };
 
     await saveAnalysis(userId, emptyResult);
     return emptyResult;
   }
-
-  const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
 
   const prompt = `You are an expert nutritionist analyzing a user's meal plans.
 
@@ -104,7 +145,7 @@ User profile:
 - Activity Level: ${user.activity_level}
 - Goal: ${user.goal}
 
-Their current meal plans:
+Their recently saved meals:
 ${mealSummary}
 
 Based on this, estimate how well their diet meets daily nutritional needs.
@@ -127,89 +168,63 @@ Return ONLY valid JSON, no markdown fences, in this exact structure:
 Rules:
 - "percent" is 0-100, how well that category meets this user's daily needs given their goal
 - "status" must be one of: "Good", "Average", "Low"
-- Give 3-5 advice items, specific to what's actually in their meal plan (mention actual meals when relevant)
+- Give 3-5 advice items, specific to what's actually in their meals (mention actual meals when relevant)
 - Do not wrap the JSON in markdown code fences`;
 
-  const result = await model.generateContent(prompt);
-  const responseText = result.response.text();
+  let responseText;
+  try {
+    const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
+    const result = await model.generateContent(prompt);
+    responseText = result.response.text();
+  } catch (err) {
+    console.error('Nutrition analysis Gemini call failed:', err);
+    throw new AppError('Nutrition analysis is temporarily unavailable. Please try again shortly.', 502);
+  }
 
   const analysis = parseJsonSafely(responseText, null);
 
   if (!analysis) {
-    throw new Error('AI returned an unreadable analysis');
+    throw new AppError('AI returned an unreadable analysis, please try again', 502);
   }
 
   await saveAnalysis(userId, analysis);
   return analysis;
 };
 
-const saveAnalysis = async (userId, analysis) => {
-  await db.execute(
-    `INSERT INTO nutrition_analysis (user_id, analysis)
-     VALUES (?, ?)
-     ON DUPLICATE KEY UPDATE analysis = VALUES(analysis), updated_at = NOW()`,
-    [userId, JSON.stringify(analysis)]
-  );
-};
-
 // GET /api/nutrition-analysis
 // Returns the cached analysis if one exists, otherwise generates a fresh one.
 const getNutritionAnalysis = async (req, res) => {
-  try {
-    const userId = req.user?.id;
+  const userId = req.user?.id;
+  if (!userId) throw new AppError('User ID not found in token', 401);
 
-    if (!userId) {
-      return res.status(401).json({ success: false, error: 'User ID not found in token' });
-    }
+  const [cached] = await db.execute(
+    'SELECT analysis, updated_at FROM nutrition_analysis WHERE user_id = ?',
+    [userId]
+  );
 
-    const [cached] = await db.execute(
-      'SELECT analysis, updated_at FROM nutrition_analysis WHERE user_id = ?',
-      [userId]
-    );
-
-    if (cached.length > 0) {
-      return res.json({
-        success: true,
-        cached: true,
-        updatedAt: cached[0].updated_at,
-        analysis: parseJsonSafely(cached[0].analysis, {}),
-      });
-    }
-
-    const analysis = await runAnalysis(userId);
-
+  if (cached.length > 0) {
     return res.json({
       success: true,
-      cached: false,
-      analysis,
+      cached: true,
+      updatedAt: cached[0].updated_at,
+      analysis: parseJsonSafely(cached[0].analysis, {}),
     });
-  } catch (error) {
-    console.error('Nutrition analysis error:', error);
-    return res.status(500).json({ success: false, error: error.message });
   }
+
+  const analysis = await runAnalysis(userId);
+
+  return res.json({ success: true, cached: false, analysis });
 };
 
 // POST /api/nutrition-analysis/generate
 // Always regenerates, ignoring any cached result. Used by a "Refresh" button.
 const generateNutritionAnalysis = async (req, res) => {
-  try {
-    const userId = req.user?.id;
+  const userId = req.user?.id;
+  if (!userId) throw new AppError('User ID not found in token', 401);
 
-    if (!userId) {
-      return res.status(401).json({ success: false, error: 'User ID not found in token' });
-    }
+  const analysis = await runAnalysis(userId);
 
-    const analysis = await runAnalysis(userId);
-
-    return res.json({
-      success: true,
-      cached: false,
-      analysis,
-    });
-  } catch (error) {
-    console.error('Nutrition analysis generation error:', error);
-    return res.status(500).json({ success: false, error: error.message });
-  }
+  return res.json({ success: true, cached: false, analysis });
 };
 
 module.exports = {

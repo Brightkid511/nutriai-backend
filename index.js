@@ -50,12 +50,22 @@ const aiLimiter = rateLimit({
   legacyHeaders: false,
   message: { success: false, error: 'You are sending requests too quickly. Please slow down.' },
 });
-
 app.use('/api/users/login', authLimiter);
 app.use('/api/users/register', authLimiter);
 app.use('/api/ai-chef', aiLimiter);
 app.use('/api/meal-builder/suggest', aiLimiter);
-app.use('/api/meal-plans', aiLimiter);
+
+
+// auto-fill-week makes up to 21 AI calls in a single request - needs its
+// own, much tighter limit so it can't be spammed or run up your Gemini bill.
+const weekFillLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000, // 24 hours
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: 'You have reached the daily limit for auto-filling a week. Please try again tomorrow.' },
+});
+app.use('/api/meal-builder/auto-fill-week', weekFillLimiter);
 
 // ---- Routes ----
 app.use('/api/users', userRoutes);

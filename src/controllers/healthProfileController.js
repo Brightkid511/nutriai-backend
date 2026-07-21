@@ -1,4 +1,7 @@
 const db = require('../config/db');
+const AppError = require('../utils/AppError');
+
+const VALID_LIFE_STAGES = ['none', 'pregnant', 'breastfeeding'];
 
 const parseJsonArraySafely = (value) => {
   if (Array.isArray(value)) return value;
@@ -22,6 +25,8 @@ const toProfileResponse = (row) => {
       allergies: [],
       conditions: [],
       dietaryPreference: 'None',
+      lifeStage: 'none',
+      pregnancyTrimester: null,
       notes: '',
     };
   }
@@ -30,105 +35,84 @@ const toProfileResponse = (row) => {
     allergies: parseJsonArraySafely(row.allergies),
     conditions: parseJsonArraySafely(row.conditions),
     dietaryPreference: row.dietary_preference || 'None',
+    lifeStage: row.life_stage || 'none',
+    pregnancyTrimester: row.pregnancy_trimester || null,
     notes: row.notes || '',
   };
 };
 
 // GET /api/health-profile
 const getHealthProfile = async (req, res) => {
-  try {
-    const userId = req.user?.id;
+  const userId = req.user?.id;
+  if (!userId) throw new AppError('User ID not found in token', 401);
 
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        error: 'User ID not found in token',
-      });
-    }
+  const [rows] = await db.execute('SELECT * FROM health_profiles WHERE user_id = ?', [userId]);
 
-    const [rows] = await db.execute(
-      'SELECT * FROM health_profiles WHERE user_id = ?',
-      [userId]
-    );
-
-    return res.json({
-      success: true,
-      profile: toProfileResponse(rows[0]),
-    });
-  } catch (error) {
-    console.error('Error fetching health profile:', error);
-
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to fetch health profile',
-    });
-  }
+  return res.json({
+    success: true,
+    profile: toProfileResponse(rows[0]),
+  });
 };
 
 // PUT /api/health-profile
-// body: { allergies: string[], conditions: string[], dietaryPreference: string, notes: string }
+// body: { allergies: string[], conditions: string[], dietaryPreference: string,
+//         lifeStage?: 'none'|'pregnant'|'breastfeeding', pregnancyTrimester?: 1|2|3, notes: string }
 const updateHealthProfile = async (req, res) => {
-  try {
-    const userId = req.user?.id;
+  const userId = req.user?.id;
+  if (!userId) throw new AppError('User ID not found in token', 401);
 
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        error: 'User ID not found in token',
-      });
-    }
+  const {
+    allergies = [],
+    conditions = [],
+    dietaryPreference = 'None',
+    lifeStage = 'none',
+    pregnancyTrimester = null,
+    notes = '',
+  } = req.body;
 
-    const {
-      allergies = [],
-      conditions = [],
-      dietaryPreference = 'None',
-      notes = '',
-    } = req.body;
-
-    if (!Array.isArray(allergies) || !Array.isArray(conditions)) {
-      return res.status(400).json({
-        success: false,
-        error: 'allergies and conditions must be arrays',
-      });
-    }
-
-    await db.execute(
-      `INSERT INTO health_profiles
-       (user_id, allergies, conditions, dietary_preference, notes)
-       VALUES (?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         allergies = VALUES(allergies),
-         conditions = VALUES(conditions),
-         dietary_preference = VALUES(dietary_preference),
-         notes = VALUES(notes),
-         updated_at = NOW()`,
-      [
-        userId,
-        JSON.stringify(allergies),
-        JSON.stringify(conditions),
-        dietaryPreference,
-        notes,
-      ]
-    );
-
-    const [rows] = await db.execute(
-      'SELECT * FROM health_profiles WHERE user_id = ?',
-      [userId]
-    );
-
-    return res.json({
-      success: true,
-      message: 'Health profile saved successfully',
-      profile: toProfileResponse(rows[0]),
-    });
-  } catch (error) {
-    console.error('Error saving health profile:', error);
-
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to save health profile',
-    });
+  if (!Array.isArray(allergies) || !Array.isArray(conditions)) {
+    throw new AppError('allergies and conditions must be arrays', 400);
   }
+
+  if (!VALID_LIFE_STAGES.includes(lifeStage)) {
+    throw new AppError(`lifeStage must be one of: ${VALID_LIFE_STAGES.join(', ')}`, 400);
+  }
+
+  const trimesterValue =
+    lifeStage === 'pregnant' && [1, 2, 3].includes(Number(pregnancyTrimester))
+      ? Number(pregnancyTrimester)
+      : null;
+
+  await db.execute(
+    `INSERT INTO health_profiles
+     (user_id, allergies, conditions, dietary_preference, life_stage, pregnancy_trimester, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       allergies = VALUES(allergies),
+       conditions = VALUES(conditions),
+       dietary_preference = VALUES(dietary_preference),
+       life_stage = VALUES(life_stage),
+       pregnancy_trimester = VALUES(pregnancy_trimester),
+       notes = VALUES(notes),
+       updated_at = NOW()`,
+    [
+      userId,
+      JSON.stringify(allergies),
+      JSON.stringify(conditions),
+      dietaryPreference,
+      lifeStage,
+      trimesterValue,
+      notes,
+    ]
+  );
+
+  const [rows] = await db.execute('SELECT * FROM health_profiles WHERE user_id = ?', [userId]);
+
+  return res.json({
+    success: true,
+    message: 'Health profile saved successfully',
+    profile: toProfileResponse(rows[0]),
+  });
 };
 
 // Builds a short natural-language block describing the user's health
@@ -136,13 +120,10 @@ const updateHealthProfile = async (req, res) => {
 // the meal-plan generator and AI Chef so suggestions stay safe.
 // Returns '' if the user has no relevant profile data.
 const getHealthProfileText = async (userId) => {
-  const [rows] = await db.execute(
-    'SELECT * FROM health_profiles WHERE user_id = ?',
-    [userId]
-  );
+  const [rows] = await db.execute('SELECT * FROM health_profiles WHERE user_id = ?', [userId]);
 
   const profile = toProfileResponse(rows[0]);
-  const { allergies, conditions, dietaryPreference, notes } = profile;
+  const { allergies, conditions, dietaryPreference, lifeStage, pregnancyTrimester, notes } = profile;
 
   const parts = [];
 
@@ -163,6 +144,21 @@ const getHealthProfileText = async (userId) => {
 
   if (dietaryPreference && dietaryPreference !== 'None') {
     parts.push(`DIETARY PREFERENCE - ${dietaryPreference}.`);
+  }
+
+  if (lifeStage === 'pregnant') {
+    parts.push(
+      `LIFE STAGE - the user is PREGNANT${pregnancyTrimester ? ` (trimester ${pregnancyTrimester})` : ''}. ` +
+      `This is a hard constraint: avoid raw or undercooked meat/eggs/fish, unpasteurized dairy, ` +
+      `raw sprouts, excess vitamin A (e.g. liver in large amounts), unwashed produce, and high-mercury fish. ` +
+      `Keep caffeine sources modest. Prioritize iron, folate, calcium, and protein-rich options common in local cuisine.`
+    );
+  } else if (lifeStage === 'breastfeeding') {
+    parts.push(
+      `LIFE STAGE - the user is BREASTFEEDING. ` +
+      `Prioritize extra hydration, adequate calories, calcium, and protein. ` +
+      `Avoid suggesting excessive caffeine or alcohol-containing dishes.`
+    );
   }
 
   if (notes && notes.trim()) {
